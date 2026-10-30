@@ -19,7 +19,13 @@ function Shop() {
     const [shop, setShop] = useState(undefined)
     const [items, setItems] = useState([])
 
+
     const handleGetShop = useCallback(async () => {
+
+        if (!shopId) {
+            setShop(null)
+            return
+        }
 
         try {
 
@@ -52,6 +58,7 @@ function Shop() {
         }
 
     }, [shopId, city])
+
 
     useEffect(() => {
         handleGetShop()
