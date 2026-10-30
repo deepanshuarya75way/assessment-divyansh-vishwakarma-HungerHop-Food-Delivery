@@ -5,7 +5,7 @@ import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import axios from 'axios'
 import Navbar from '../components/Navbar'
-import { MapPin, LocateFixed, Search, Wallet, Smartphone, ShoppingBag, Currency } from 'lucide-react'
+import { MapPin, LocateFixed, Search, Wallet, Smartphone, ShoppingBag, Tag } from 'lucide-react'
 import { setLocation, setAddress } from '../redux/mapSlice'
 import { serverUrl } from '../App'
 import { useNavigate } from 'react-router-dom'
@@ -47,9 +47,10 @@ function LocationMarker({ position, onPick }) {
 
 function Checkout() {
     const dispatch = useDispatch()
-    const navigate=useNavigate();
+    const navigate = useNavigate()
     const { location, address } = useSelector(state => state.map)
     const { cartItems } = useSelector(state => state.user)
+    const { userData } = useSelector(state => state.user)
 
     const [locating, setLocating] = useState(false)
     const [searching, setSearching] = useState(false)
@@ -58,13 +59,57 @@ function Checkout() {
     const [paymentMethod, setPaymentMethod] = useState("cod")
     const [placing, setPlacing] = useState(false)
 
+    // Fallback city from user profile or default location context
+    const currentCity = userData?.city || ""
+
     const position = (location?.lati && location?.long)
         ? [location.lati, location.long]
         : [26.7606, 83.3732]
 
-    const subtotal = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
-    const deliveryFee = subtotal === 0 ? 0 : subtotal > 100 ? 0 : 25
-    const totalAmount = subtotal + deliveryFee
+    // Helper function to calculate price and discounts per item based on city
+    const calculateItemPricing = (item) => {
+        const baseUnitPrice = Number(item.price) || 0
+        let discountPercentage = 0
+
+        if (Array.isArray(item.cityDiscounts) && currentCity) {
+            const matchedDiscount = item.cityDiscounts.find(
+                d => d.city?.trim().toLowerCase() === currentCity.trim().toLowerCase()
+            )
+            if (matchedDiscount) {
+                discountPercentage = Number(matchedDiscount.discount) || 0
+            }
+        }
+
+        const discountedUnitPrice = discountPercentage > 0
+            ? Math.round(baseUnitPrice * (1 - discountPercentage / 100))
+            : baseUnitPrice
+
+        const originalTotal = baseUnitPrice * item.quantity
+        const finalTotal = discountedUnitPrice * item.quantity
+        const savings = originalTotal - finalTotal
+
+        return {
+            baseUnitPrice,
+            discountedUnitPrice,
+            discountPercentage,
+            originalTotal,
+            finalTotal,
+            savings
+        }
+    }
+
+    // Calculations for totals across all cart items
+    const cartSummary = cartItems.reduce((acc, item) => {
+        const pricing = calculateItemPricing(item)
+        return {
+            subtotalOriginal: acc.subtotalOriginal + pricing.originalTotal,
+            subtotalFinal: acc.subtotalFinal + pricing.finalTotal,
+            totalSavings: acc.totalSavings + pricing.savings
+        }
+    }, { subtotalOriginal: 0, subtotalFinal: 0, totalSavings: 0 })
+
+    const deliveryFee = cartSummary.subtotalFinal === 0 ? 0 : cartSummary.subtotalFinal > 100 ? 0 : 25
+    const totalAmount = cartSummary.subtotalFinal + deliveryFee
 
     const reverseGeocode = async (lat, lng) => {
         try {
@@ -72,7 +117,7 @@ function Checkout() {
                 `https://api.geoapify.com/v1/geocode/reverse?lat=${lat}&lon=${lng}&format=json&apiKey=${import.meta.env.VITE_GEOAPIKEY}`
             )
             const place = result.data.results[0]
-            const fullAddress = place.formatted || place.address_line1 || place.address_line2 || ""
+            const fullAddress = place?.formatted || place?.address_line1 || place?.address_line2 || ""
             dispatch(setAddress(fullAddress))
             setAddressInput(fullAddress)
         } catch (error) {
@@ -153,13 +198,16 @@ function Checkout() {
         setPlacing(true)
         try {
             const result = await axios.post(`${serverUrl}/order/place-order`, {
-                cartItems: cartItems.map(item => ({
-                    _id: item.id,
-                    shop: item.shop,
-                    name: item.name,
-                    price: item.price,
-                    quantity: item.quantity
-                })),
+                cartItems: cartItems.map(item => {
+                    const pricing = calculateItemPricing(item)
+                    return {
+                        _id: item._id || item.id,
+                        shop: item.shop,
+                        name: item.name,
+                        price: pricing.discountedUnitPrice, // Send discounted price if applicable
+                        quantity: item.quantity
+                    }
+                }),
                 deliveryAddress: {
                     text: addressInput,
                     latitude: location.lati,
@@ -168,40 +216,49 @@ function Checkout() {
                 paymentMethod,
                 totalAmount
             }, { withCredentials: true })
-        if(paymentMethod=="cod"){
-            dispatch(addMyOrders(result.data.data));
-           navigate("/order-placed", { state: { order: result.data.data } })
-        }
-        else{
-            const orderId=result.data.data.orderId;
-            const razorOrder=result.data.data.razorOrder;
-            openRazorpayWindow(orderId,razorOrder);
-        }
+
+            if (paymentMethod === "cod") {
+                dispatch(addMyOrders(result.data.data))
+                navigate("/order-placed", { state: { order: result.data.data } })
+            } else {
+                const orderId = result.data.data.orderId
+                const razorOrder = result.data.data.razorOrder
+                openRazorpayWindow(orderId, razorOrder)
+            }
         } catch (error) {
             console.log(error)
+            alert(error?.response?.data?.message || "Failed to place order")
         } finally {
             setPlacing(false)
         }
     }
-    const openRazorpayWindow=(orderId,razorOrder)=>{
-        const options={
-            key:import.meta.env.VITE_RAZORPAY_API_KEY,
-            amount:razorOrder.amount,
-            currency:'INR',
-            name:"HungerHop",
-            description:"Food Delivery Website",
-            order_id:razorOrder.id,
-            handler:async function (res) {
+
+    const openRazorpayWindow = (orderId, razorOrder) => {
+        const options = {
+            key: import.meta.env.VITE_RAZORPAY_API_KEY,
+            amount: razorOrder.amount,
+            currency: 'INR',
+            name: "HungerHop",
+            description: "Food Delivery Website",
+            order_id: razorOrder.id,
+            handler: async function (res) {
                 try {
-                    const result=await axios.post(`${serverUrl}/order/verify-payment`,{razorpay_paymentId:res.razorpay_payment_id,orderId},{withCredentials:true})
-                    dispatch(addMyOrders(result.data.data));
+                    const result = await axios.post(`${serverUrl}/order/verify-payment`, {
+                        razorpay_paymentId: res.razorpay_payment_id,
+                        razorpay_order_id: res.razorpay_order_id,
+                        razorpay_signature: res.razorpay_signature,
+                        orderId
+                    }, { withCredentials: true })
+                    
+                    dispatch(addMyOrders(result.data.data))
                     navigate("/order-placed", { state: { order: result.data.data } })
                 } catch (error) {
                     console.log(error)
+                    alert("Payment verification failed")
                 }
             }
         }
-        const rzp=new window.Razorpay(options)
+        const rzp = new window.Razorpay(options)
         rzp.open()
     }
 
@@ -216,12 +273,14 @@ function Checkout() {
                     </div>
                     <div>
                         <h1 className="text-xl sm:text-xl font-bold text-gray-800">Checkout</h1>
-                        <p className="text-gray-500 text-xs sm:text-sm">Confirm your delivery details and payment method</p>
+                        <p className="text-gray-500 text-xs sm:text-sm">
+                            Confirm your delivery details and payment method {currentCity && `(Pricing for ${currentCity})`}
+                        </p>
                     </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-6">
-                    {/* Left column: address + payment */}
+                    {/* Left column: Address & Payment */}
                     <div className="lg:col-span-2 space-y-5 sm:space-y-6">
                         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
                             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
@@ -230,6 +289,7 @@ function Checkout() {
                                     Delivery Address
                                 </h2>
                                 <button
+                                    type="button"
                                     onClick={handleUseCurrentLocation}
                                     disabled={locating}
                                     className="flex items-center gap-1.5 text-xs font-medium text-orange-600 hover:text-orange-700 disabled:opacity-50 transition self-start sm:self-auto"
@@ -265,9 +325,6 @@ function Checkout() {
                                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 resize-none mb-4"
                             />
 
-                            <p className="text-xs text-gray-400 mb-2">
-                                Search above, tap on the map, or drag the pin to set your exact drop-off point.
-                            </p>
                             <div className="h-52 sm:h-64 lg:h-72 rounded-xl overflow-hidden border border-gray-200">
                                 <MapContainer
                                     center={position}
@@ -291,13 +348,15 @@ function Checkout() {
                                 <button
                                     type="button"
                                     onClick={() => setPaymentMethod("cod")}
-                                    className={`flex items-center gap-3 border rounded-xl p-3.5 sm:p-4 text-left transition ${paymentMethod === "cod"
+                                    className={`flex items-center gap-3 border rounded-xl p-3.5 sm:p-4 text-left transition ${
+                                        paymentMethod === "cod"
                                             ? "border-orange-500 bg-orange-50 ring-1 ring-orange-500"
                                             : "border-gray-200 hover:border-orange-200"
-                                        }`}
+                                    }`}
                                 >
-                                    <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center shrink-0 ${paymentMethod === "cod" ? "bg-orange-500 text-white" : "bg-gray-100 text-gray-500"
-                                        }`}>
+                                    <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center shrink-0 ${
+                                        paymentMethod === "cod" ? "bg-orange-500 text-white" : "bg-gray-100 text-gray-500"
+                                    }`}>
                                         <Wallet className="w-4 h-4 sm:w-5 sm:h-5" />
                                     </div>
                                     <div className="min-w-0">
@@ -309,13 +368,15 @@ function Checkout() {
                                 <button
                                     type="button"
                                     onClick={() => setPaymentMethod("online")}
-                                    className={`flex items-center gap-3 border rounded-xl p-3.5 sm:p-4 text-left transition ${paymentMethod === "online"
+                                    className={`flex items-center gap-3 border rounded-xl p-3.5 sm:p-4 text-left transition ${
+                                        paymentMethod === "online"
                                             ? "border-orange-500 bg-orange-50 ring-1 ring-orange-500"
                                             : "border-gray-200 hover:border-orange-200"
-                                        }`}
+                                    }`}
                                 >
-                                    <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center shrink-0 ${paymentMethod === "online" ? "bg-orange-500 text-white" : "bg-gray-100 text-gray-500"
-                                        }`}>
+                                    <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center shrink-0 ${
+                                        paymentMethod === "online" ? "bg-orange-500 text-white" : "bg-gray-100 text-gray-500"
+                                    }`}>
                                         <Smartphone className="w-4 h-4 sm:w-5 sm:h-5" />
                                     </div>
                                     <div className="min-w-0">
@@ -327,7 +388,7 @@ function Checkout() {
                         </div>
                     </div>
 
-                    {/* Right column: order summary, sticky on desktop */}
+                    {/* Right column: Order Summary with Discounts */}
                     <div className="lg:sticky lg:top-20 h-fit">
                         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 sm:p-5">
                             <h2 className="font-bold text-gray-800 mb-4 text-sm sm:text-base">Order Summary</h2>
@@ -335,34 +396,68 @@ function Checkout() {
                             {cartItems.length === 0 ? (
                                 <p className="text-sm text-gray-400">Your cart is empty</p>
                             ) : (
-                                <div className="space-y-2 mb-4 max-h-56 overflow-y-auto pr-1">
-                                    {cartItems.map((item) => (
-                                        <div key={item.id} className="flex items-center justify-between text-sm">
-                                            <span className="text-gray-600 truncate pr-2">
-                                                {item.name} <span className="text-gray-400">x{item.quantity}</span>
-                                            </span>
-                                            <span className="text-gray-800 font-medium shrink-0">
-                                                ₹{item.price * item.quantity}
-                                            </span>
-                                        </div>
-                                    ))}
+                                <div className="space-y-3 mb-4 max-h-56 overflow-y-auto pr-1">
+                                    {cartItems.map((item) => {
+                                        const pricing = calculateItemPricing(item)
+                                        return (
+                                            <div key={item._id || item.id} className="text-sm border-b border-gray-50 pb-2">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-gray-700 font-medium truncate pr-2">
+                                                        {item.name} <span className="text-gray-400 font-normal">x{item.quantity}</span>
+                                                    </span>
+                                                    <div className="text-right shrink-0">
+                                                        {pricing.discountPercentage > 0 ? (
+                                                            <div>
+                                                                <span className="text-xs text-gray-400 line-through mr-1.5">
+                                                                    ₹{pricing.originalTotal}
+                                                                </span>
+                                                                <span className="text-gray-800 font-semibold">
+                                                                    ₹{pricing.finalTotal}
+                                                                </span>
+                                                            </div>
+                                                        ) : (
+                                                            <span className="text-gray-800 font-semibold">
+                                                                ₹{pricing.finalTotal}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                {pricing.discountPercentage > 0 && (
+                                                    <div className="flex items-center gap-1 text-[11px] text-green-600 mt-0.5">
+                                                        <Tag className="w-3 h-3" />
+                                                        <span>{pricing.discountPercentage}% city discount applied</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )
+                                    })}
                                 </div>
                             )}
 
                             <div className="h-px bg-gray-100 mb-3" />
 
-                            <div className="space-y-2">
-                                <div className="flex items-center justify-between text-sm text-gray-600">
+                            <div className="space-y-2 text-sm text-gray-600">
+                                <div className="flex items-center justify-between">
                                     <span>Subtotal</span>
-                                    <span>₹{subtotal}</span>
+                                    <span>₹{cartSummary.subtotalOriginal}</span>
                                 </div>
-                                <div className="flex items-center justify-between text-sm text-gray-600">
+
+                                {cartSummary.totalSavings > 0 && (
+                                    <div className="flex items-center justify-between text-green-600 font-medium">
+                                        <span>City Discount Savings</span>
+                                        <span>-₹{cartSummary.totalSavings}</span>
+                                    </div>
+                                )}
+
+                                <div className="flex items-center justify-between">
                                     <span>Delivery Fee</span>
                                     <span>{deliveryFee === 0 ? "Free" : `₹${deliveryFee}`}</span>
                                 </div>
+
                                 <div className="h-px bg-gray-100 my-2" />
-                                <div className="flex items-center justify-between font-bold text-gray-800">
-                                    <span>Total</span>
+                                
+                                <div className="flex items-center justify-between font-bold text-gray-900 text-base">
+                                    <span>Total to Pay</span>
                                     <span>₹{totalAmount}</span>
                                 </div>
                             </div>
@@ -370,7 +465,7 @@ function Checkout() {
                             <button
                                 onClick={handlePlaceOrder}
                                 disabled={placing || cartItems.length === 0}
-                                className="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 rounded-lg transition mt-5 disabled:opacity-60 disabled:cursor-not-allowed text-sm sm:text-base"
+                                className="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 rounded-lg transition mt-5 disabled:opacity-60 disabled:cursor-not-allowed text-sm sm:text-base shadow-sm"
                             >
                                 {placing ? "Placing Order..." : `Place Order — ₹${totalAmount}`}
                             </button>

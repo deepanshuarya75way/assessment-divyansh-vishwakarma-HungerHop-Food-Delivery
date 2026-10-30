@@ -19,9 +19,6 @@ function UserDashBoard() {
         ? items?.filter(item => item.category === selectedCategory)
         : items
 
-    // ✅ a search is "active" once searchItems has been set to an array at all —
-    // including an empty one, which means "searched, found nothing" rather than
-    // "hasn't searched yet". Adjust this check if your slice's default differs.
     const isSearching = searchItems !== null && searchItems !== undefined
 
     return (
