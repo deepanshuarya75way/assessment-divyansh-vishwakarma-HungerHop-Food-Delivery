@@ -26,7 +26,7 @@ import Shop from './pages/Shop'
 import { socket } from './socket'
 import { addMyOrders, setSocketConnected } from './redux/userSlice'
 
-export const serverUrl = "http://localhost:8000/api/v1";
+export const serverUrl = `${import.meta.env.VITE_API_URL}/api/v1`;
 
 function App() {
 
